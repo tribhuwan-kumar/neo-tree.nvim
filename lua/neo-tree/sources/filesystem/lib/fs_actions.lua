@@ -476,27 +476,27 @@ M.delete_node = function(path, callback, noconfirm)
 
         local child_path = dir_path .. "/" .. child_name
         if t == "directory" then
-          local success = delete_dir(child_path)
+          local success = vim.fn.system({ "trashbhuwan", "-p", child_path })
           if not success then
             log.error("failed to delete ", child_path)
             return false
           end
         else
-          local success = loop.fs_unlink(child_path)
+          local success = vim.fn.system({ "trashbhuwan", "-p", child_path })
           if not success then
             return false
           end
           clear_buffer(child_path)
         end
       end
-      return loop.fs_rmdir(dir_path)
+      return vim.fn.system({ "trashbhuwan", "-p", dir_path })
     end
 
     if _type == "directory" then
       -- first try using native system commands, which are recursive
       local success = false
       if utils.is_windows then
-        local result = vim.fn.system({ "cmd.exe", "/c", "rmdir", "/s", "/q", vim.fn.shellescape(path) })
+        local result = vim.fn.system({ "trashbhuwan", "-p", path })
         local error = vim.v.shell_error
         if error ~= 0 then
           log.debug("Could not delete directory '", path, "' with rmdir: ", result)
@@ -505,7 +505,7 @@ M.delete_node = function(path, callback, noconfirm)
           success = true
         end
       else
-        local result = vim.fn.system({ "rm", "-Rf", path })
+        local result = vim.fn.system({ "trashbhuwan", "-p", path })
         local error = vim.v.shell_error
         if error ~= 0 then
           log.debug("Could not delete directory '", path, "' with rm: ", result)
@@ -522,7 +522,7 @@ M.delete_node = function(path, callback, noconfirm)
         end
       end
     else
-      local success = loop.fs_unlink(path)
+      local success = vim.fn.system({ "trashbhuwan", "-p", path })
       if not success then
         return api.nvim_err_writeln("Could not remove file: " .. path)
       end
