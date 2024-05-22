@@ -141,7 +141,6 @@ use {
         popup_border_style = "rounded",
         enable_git_status = true,
         enable_diagnostics = true,
-        enable_normal_mode_for_inputs = false, -- Enable normal mode for input dialogs.
         open_files_do_not_replace_types = { "terminal", "trouble", "qf" }, -- when opening files, do not use windows containing these filetypes or buftypes
         sort_case_insensitive = false, -- used when sorting files and directories in the tree
         sort_function = nil , -- use a custom function for sorting files and directories in the tree 
@@ -667,7 +666,7 @@ add `"document_symbols"` to `config.sources` and open it with the command
 ### External Sources
 
 There are more sources available as extensions that are managed outside of this repository. See the
-[wiki](https://github.com/nvim-neo-tree/neo-tree.nvim/wiki/External-Sources) for me information.
+[wiki](https://github.com/nvim-neo-tree/neo-tree.nvim/wiki/External-Sources) for more information.
 
 ### Source Selector
 
