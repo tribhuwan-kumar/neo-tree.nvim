@@ -46,8 +46,6 @@ local define_events = function()
     return args
   end)
 
-
-
   local update_opened_buffers = function(args)
     args.opened_buffers = utils.get_opened_buffers()
     return args
@@ -203,7 +201,7 @@ M.buffer_enter_event = function()
   if prior_buf < 1 then
     return
   end
-  local prior_type = vim.api.nvim_buf_get_option(prior_buf, "filetype")
+  local prior_type = vim.bo[prior_buf].filetype
 
   -- there is nothing more we want to do with floating windows
   -- but when prior_type is neo-tree we might need to redirect buffer somewhere else.
@@ -250,6 +248,7 @@ M.buffer_enter_event = function()
     vim.schedule(function()
       -- try to delete the buffer, only because if it was new it would take
       -- on options from the neo-tree window that are undesirable.
+      ---@diagnostic disable-next-line: param-type-mismatch
       pcall(vim.cmd, "bdelete " .. bufname)
       local fake_state = {
         window = {
@@ -298,10 +297,12 @@ M.win_enter_event = function()
             local buf_name, message
             if vim.startswith(filename, "[No Name]#") then
               buf_name = string.sub(filename, 11)
-              message = "Cannot close because an unnamed buffer is modified. Please save or discard this file."
+              message =
+                "Cannot close because an unnamed buffer is modified. Please save or discard this file."
             else
               buf_name = filename
-              message = "Cannot close because one of the files is modified. Please save or discard changes."
+              message =
+                "Cannot close because one of the files is modified. Please save or discard changes."
             end
             log.trace("close_if_last_window, showing unnamed modified buffer: ", filename)
             vim.schedule(function()
@@ -470,7 +471,9 @@ local merge_renderers = function(default_config, source_default_config, user_con
   end
 end
 
-M.merge_config = function(user_config, is_auto_config)
+---@param user_config neotree.Config?
+---@return neotree.Config._Full full_config
+M.merge_config = function(user_config)
   local default_config = vim.deepcopy(defaults)
   user_config = vim.deepcopy(user_config or {})
 
@@ -494,9 +497,20 @@ M.merge_config = function(user_config, is_auto_config)
   define_events()
 
   -- Prevent accidentally opening another file in the neo-tree window.
+  vim.g.neotree_watching_bufenter = 1
   events.subscribe({
     event = events.VIM_BUFFER_ENTER,
     handler = M.buffer_enter_event,
+  })
+  events.subscribe({
+    event = events.NEO_TREE_WINDOW_AFTER_OPEN,
+    handler = function(args)
+      if not vim.w[args.winid].neo_tree_settings_applied then
+        -- TODO: should figure out a less disorganized way to set window options
+        -- BufEnter doesn't trigger while vim is starting up so this will handle it instead.
+        M.buffer_enter_event()
+      end
+    end,
   })
 
   -- Setup autocmd for neo-tree BufLeave, to restore window settings.
@@ -528,7 +542,7 @@ M.merge_config = function(user_config, is_auto_config)
   -- used to either limit the sources that or loaded, or add extra external sources
   local all_sources = {}
   local all_source_names = {}
-  for _, source in ipairs(user_config.sources or default_config.sources) do
+  for _, source in ipairs(user_config.sources or default_config.sources or {}) do
     local parts = utils.split(source, ".")
     local name = parts[#parts]
     local is_internal_ns, is_external_ns = false, false
@@ -614,20 +628,21 @@ M.merge_config = function(user_config, is_auto_config)
   end
   --print(vim.inspect(default_config.filesystem))
 
-  -- Moving user_config.sources to user_config.orig_sources
-  user_config.orig_sources = user_config.sources and user_config.sources or {}
+  -- local orig_sources = user_config.sources and user_config.sources or {}
 
   -- apply the users config
-  M.config = vim.tbl_deep_extend("force", default_config, user_config)
+  M.config = vim.tbl_deep_extend("force", default_config, user_config) --[[@as neotree.Config._Full]]
 
   -- RE: 873, fixes issue with invalid source checking by overriding
   -- source table with name table
   -- Setting new "sources" to be the parsed names of the sources
   M.config.sources = all_source_names
 
-  if ( M.config.source_selector.winbar or M.config.source_selector.statusline )
+  if
+    (M.config.source_selector.winbar or M.config.source_selector.statusline)
     and M.config.source_selector.sources
-    and not user_config.default_source then
+    and not user_config.default_source
+  then
     -- Set the default source to the head of these
     -- This resolves some weirdness with the source selector having
     -- a different "head" item than our current default.
@@ -640,14 +655,19 @@ M.merge_config = function(user_config, is_auto_config)
   -- log a warning and then "pick" the first in the sources list
   local match = false
   for _, source in ipairs(M.config.sources) do
-      if source == M.config.default_source then
-        match = true
-        break
-      end
+    if source == M.config.default_source then
+      match = true
+      break
+    end
   end
   if not match and M.config.default_source ~= "last" then
     M.config.default_source = M.config.sources[1]
-    log.warn(string.format("Invalid default source found in configuration. Using first available source: %s", M.config.default_source))
+    log.warn(
+      string.format(
+        "Invalid default source found in configuration. Using first available source: %s",
+        M.config.default_source
+      )
+    )
   end
 
   if not M.config.enable_git_status then

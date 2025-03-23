@@ -1,24 +1,26 @@
-local vim = vim
 local q = require("neo-tree.events.queue")
 local log = require("neo-tree.log")
 local utils = require("neo-tree.utils")
 
+---@class neotree.Event.Functions
 local M = {
   -- Well known event names, you can make up your own
-  STATE_CREATED = "state_created",
-  BEFORE_RENDER = "before_render",
   AFTER_RENDER = "after_render",
+  BEFORE_FILE_ADD = "before_file_add",
+  BEFORE_FILE_DELETE = "before_file_delete",
+  BEFORE_FILE_MOVE = "before_file_move",
+  BEFORE_FILE_RENAME = "before_file_rename",
+  BEFORE_RENDER = "before_render",
   FILE_ADDED = "file_added",
   FILE_DELETED = "file_deleted",
-  BEFORE_FILE_MOVE = "before_file_move",
   FILE_MOVED = "file_moved",
-  FILE_OPEN_REQUESTED = "file_open_requested",
   FILE_OPENED = "file_opened",
-  BEFORE_FILE_RENAME = "before_file_rename",
+  FILE_OPEN_REQUESTED = "file_open_requested",
   FILE_RENAMED = "file_renamed",
   FS_EVENT = "fs_event",
   GIT_EVENT = "git_event",
   GIT_STATUS_CHANGED = "git_status_changed",
+  STATE_CREATED = "state_created",
   NEO_TREE_BUFFER_ENTER = "neo_tree_buffer_enter",
   NEO_TREE_BUFFER_LEAVE = "neo_tree_buffer_leave",
   NEO_TREE_LSP_UPDATE = "neo_tree_lsp_update",
@@ -50,38 +52,50 @@ local M = {
   VIM_WIN_ENTER = "vim_win_enter",
 }
 
-M.define_autocmd_event = function(event_name, autocmds, debounce_frequency, seed_fn, nested)
-  local opts = {
-    setup = function()
-      local tpl =
-        ":lua require('neo-tree.events').fire_event('%s', { afile = vim.F.npcall(vim.fn.expand, '<afile>') or '' })"
-      local callback = string.format(tpl, event_name)
-      if nested then
-        callback = "++nested " .. callback
-      end
+---@param autocmds string
+---@return string event
+---@return string? pattern
+local parse_autocmd_string = function(autocmds)
+  local parsed = vim.split(autocmds, " ")
+  return parsed[1], parsed[2]
+end
 
-      local autocmd = table.concat(autocmds, ",")
-      if not vim.startswith(autocmd, "User") then
-        autocmd = autocmd .. " *"
+---@param event_name neotree.Event|string
+---@param autocmds string[]
+---@param debounce_frequency integer?
+---@param seed_fn function?
+---@param nested boolean?
+M.define_autocmd_event = function(event_name, autocmds, debounce_frequency, seed_fn, nested)
+  log.debug("Defining autocmd event: %s", event_name)
+  local augroup_name = "NeoTreeEvent_" .. event_name
+  q.define_event(event_name, {
+    setup = function()
+      local augroup = vim.api.nvim_create_augroup(augroup_name, { clear = false })
+      for _, autocmd in ipairs(autocmds) do
+        local event, pattern = parse_autocmd_string(autocmd)
+        log.trace("Registering autocmds on %s %s", event, pattern or "")
+        vim.api.nvim_create_autocmd({ event }, {
+          pattern = pattern or "*",
+          group = augroup,
+          nested = nested,
+          callback = function(args)
+            ---@class neotree.Event.Autocmd.CallbackArgs : neotree._vim.api.keyset.create_autocmd.callback_args
+            ---@field afile string
+            local event_args = args --[[@as neotree._vim.api.keyset.create_autocmd.callback_args]]
+            event_args.afile = args.file or ""
+            M.fire_event(event_name, event_args)
+          end,
+        })
       end
-      local cmds = {
-        "augroup NeoTreeEvent_" .. event_name,
-        "autocmd " .. autocmd .. " " .. callback,
-        "augroup END",
-      }
-      log.trace("Registering autocmds: %s", table.concat(cmds, "\n"))
-      vim.cmd(table.concat(cmds, "\n"))
     end,
     seed = seed_fn,
     teardown = function()
       log.trace("Teardown autocmds for ", event_name)
-      vim.cmd(string.format("autocmd! NeoTreeEvent_%s", event_name))
+      vim.api.nvim_create_augroup(augroup_name, { clear = true })
     end,
     debounce_frequency = debounce_frequency,
     debounce_strategy = utils.debounce_strategy.CALL_LAST_ONLY,
-  }
-  log.debug("Defining autocmd event: %s", event_name)
-  q.define_event(event_name, opts)
+  })
 end
 
 M.clear_all_events = q.clear_all_events

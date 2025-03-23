@@ -6,7 +6,6 @@
 -- This library is free software; you can redistribute it and/or modify it
 -- under the terms of the MIT license. See LICENSE for details.
 
-local vim = vim
 -- User configuration section
 local default_config = {
   -- Name of the plugin. Prepended to log messages
@@ -27,7 +26,7 @@ local default_config = {
   -- Level configuration
   modes = {
     { name = "trace", hl = "None", level = vim.log.levels.TRACE },
-    { name = "debug", hl = "None", level = vim.log.levels.DEBGUG },
+    { name = "debug", hl = "None", level = vim.log.levels.DEBUG },
     { name = "info", hl = "None", level = vim.log.levels.INFO },
     { name = "warn", hl = "WarningMsg", level = vim.log.levels.WARN },
     { name = "error", hl = "ErrorMsg", level = vim.log.levels.ERROR },
@@ -134,7 +133,7 @@ log.new = function(config, standalone)
     if level < levels[config.level] then
       return
     end
-    -- Ignnore this if vim is exiting
+    -- Ignore this if vim is exiting
     if vim.v.dying > 0 or vim.v.exiting ~= vim.NIL then
       return
     end

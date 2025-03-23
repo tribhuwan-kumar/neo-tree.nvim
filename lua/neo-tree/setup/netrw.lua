@@ -1,17 +1,15 @@
+local uv = vim.uv or vim.loop
+local nt = require("neo-tree")
 local utils = require("neo-tree.utils")
-local log = require("neo-tree.log")
-local manager = require("neo-tree.sources.manager")
-local command = require("neo-tree.command")
 local M = {}
 
 local get_position = function(source_name)
-  local nt = require("neo-tree")
   local pos = utils.get_value(nt.config, source_name .. ".window.position", "left", true)
   return pos
 end
 
-M.get_hijack_netrw_behavior = function()
-  local nt = require("neo-tree")
+M.get_hijack_behavior = function()
+  nt.ensure_config()
   local option = "filesystem.hijack_netrw_behavior"
   local hijack_behavior = utils.get_value(nt.config, option, "open_default", true)
   if hijack_behavior == "disabled" then
@@ -21,20 +19,25 @@ M.get_hijack_netrw_behavior = function()
   elseif hijack_behavior == "open_current" then
     return hijack_behavior
   else
-    log.error("Invalid value for " .. option .. ": " .. hijack_behavior)
+    require("neo-tree.log").error("Invalid value for " .. option .. ": " .. hijack_behavior)
     return "disabled"
   end
 end
 
-M.hijack = function()
-  local hijack_behavior = M.get_hijack_netrw_behavior()
+---@param path string? Path to hijack (sometimes bufname doesn't set in time)
+---@return boolean hijacked Whether the hijack was successful
+M.hijack = function(path)
+  local hijack_behavior = M.get_hijack_behavior()
   if hijack_behavior == "disabled" then
     return false
   end
 
   -- ensure this is a directory
   local bufname = vim.api.nvim_buf_get_name(0)
-  local stats = vim.loop.fs_stat(bufname)
+  if not utils.truthy(bufname) then
+    bufname = path or ""
+  end
+  local stats = uv.fs_stat(bufname)
   if not stats then
     return false
   end
@@ -51,12 +54,14 @@ M.hijack = function()
   -- Now actually open the tree, with a very quick debounce because this may be
   -- called multiple times in quick succession.
   utils.debounce("hijack_netrw_" .. winid, function()
+    local manager = require("neo-tree.sources.manager")
+    local log = require("neo-tree.log")
     -- We will want to replace the "directory" buffer with either the "alternate"
     -- buffer or a new blank one.
     local replace_with_bufnr = vim.fn.bufnr("#")
     local is_currently_neo_tree = false
     if replace_with_bufnr > 0 then
-      if vim.api.nvim_buf_get_option(replace_with_bufnr, "filetype") == "neo-tree" then
+      if vim.bo[replace_with_bufnr].filetype == "neo-tree" then
         -- don't hijack the current window if it's already a Neo-tree sidebar
         local _, position = pcall(vim.api.nvim_buf_get_var, replace_with_bufnr, "neo_tree_position")
         if position ~= "current" then

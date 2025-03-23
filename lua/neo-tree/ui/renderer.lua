@@ -1,4 +1,3 @@
-local vim = vim
 local NuiLine = require("nui.line")
 local NuiTree = require("nui.tree")
 local NuiSplit = require("nui.split")
@@ -13,7 +12,7 @@ local log = require("neo-tree.log")
 local windows = require("neo-tree.ui.windows")
 
 local M = { resize_timer_interval = 50 }
-local ESC_KEY = vim.api.nvim_replace_termcodes("<ESC>", true, false, true)
+local ESC_KEY = utils.keycode("<ESC>")
 local default_popup_size = { width = 60, height = "80%" }
 local draw, create_tree, render_tree
 
@@ -112,7 +111,6 @@ end
 ---@param state table State of the source to close
 ---@param focus_prior_window boolean | nil if true or nil, focus the window that was previously focused
 M.close = function(state, focus_prior_window)
-
   log.debug("Closing window, but saving position first.")
   M.position.save(state)
 
@@ -215,7 +213,7 @@ local remove_filtered = function(source_items, filtered_items)
   local hidden = {}
   for _, child in ipairs(source_items) do
     local fby = child.filtered_by
-    if type(fby) == "table" and not child.is_reveal_target then
+    if type(fby) == "table" and not child.is_reveal_target and not child.contains_reveal_target then
       if not fby.never_show then
         if filtered_items.visible or child.is_nested or fby.always_show then
           table.insert(visible, child)
@@ -399,6 +397,7 @@ local prepare_node = function(item, state)
       return line
     end
   end
+  ---@class NuiLine
   local line = NuiLine()
 
   local renderer = state.renderers[item.type]
@@ -427,31 +426,32 @@ local prepare_node = function(item, state)
   local should_pad = false
 
   for _, component in ipairs(renderer) do
-    if component.enabled == false then
-      goto continue
-    end
-    local component_data, component_wanted_width =
-      M.render_component(component, item, state, remaining_cols - (should_pad and 1 or 0))
-    local actual_width = 0
-    if component_data then
-      for _, data in ipairs(component_data) do
-        if data.text then
-          local padding = ""
-          if should_pad and #data.text and data.text:sub(1, 1) ~= " " and not data.no_padding then
-            padding = " "
-          end
-          data.text = padding .. data.text
-          should_pad = data.text:sub(#data.text) ~= " " and not data.no_next_padding
+    repeat
+      if component.enabled == false then
+        break
+      end
+      local component_data, component_wanted_width =
+        M.render_component(component, item, state, remaining_cols - (should_pad and 1 or 0))
+      local actual_width = 0
+      if component_data then
+        for _, data in ipairs(component_data) do
+          if data.text then
+            local padding = ""
+            if should_pad and #data.text and data.text:sub(1, 1) ~= " " and not data.no_padding then
+              padding = " "
+            end
+            data.text = padding .. data.text
+            should_pad = data.text:sub(#data.text) ~= " " and not data.no_next_padding
 
-          actual_width = actual_width + vim.api.nvim_strwidth(data.text)
-          line:append(data.text, data.highlight)
-          remaining_cols = remaining_cols - vim.fn.strchars(data.text)
+            actual_width = actual_width + vim.api.nvim_strwidth(data.text)
+            line:append(data.text, data.highlight)
+            remaining_cols = remaining_cols - vim.fn.strchars(data.text)
+          end
         end
       end
-    end
-    component_wanted_width = component_wanted_width or actual_width
-    wanted_width = wanted_width + component_wanted_width
-    ::continue::
+      component_wanted_width = component_wanted_width or actual_width
+      wanted_width = wanted_width + component_wanted_width
+    until true
   end
 
   line.wanted_width = wanted_width
@@ -537,7 +537,9 @@ M.focus_node = function(state, id, do_not_focus_window, relative_movement, botto
       -- make sure we are not scrolled down if it can all fit on the screen
       local lines = vim.api.nvim_buf_line_count(state.bufnr)
       local win_height = vim.api.nvim_win_get_height(state.winid)
-      local virtual_bottom_line = vim.fn.line("w0", state.winid) + win_height - bottom_scroll_padding
+      local virtual_bottom_line = vim.fn.line("w0", state.winid)
+        + win_height
+        - bottom_scroll_padding
       if virtual_bottom_line <= linenr then
         execute_win_command("normal! " .. (linenr + bottom_scroll_padding) .. "zb")
         pcall(vim.api.nvim_win_set_cursor, state.winid, { linenr, col })
@@ -660,7 +662,7 @@ M.position = {
     end
     state.position.node_id = node_id
   end,
-  clear = function (state)
+  clear = function(state)
     log.debug("Forget about cursor position.")
     -- Clear saved position, so that we can save another position later.
     state.position.topline = nil
@@ -841,7 +843,7 @@ local set_buffer_mappings = function(state)
           func = func.command or func[1]
         end
         if type(func) == "string" then
-          resolved_mappings[cmd] = { text = func }
+          resolved_mappings[cmd] = { text = desc or func }
           map_options.desc = map_options.desc or func
           vfunc = state.commands[func .. "_visual"]
           func = state.commands[func]
@@ -849,8 +851,10 @@ local set_buffer_mappings = function(state)
           resolved_mappings[cmd] = { text = desc or "<function>" }
         end
         if type(func) == "function" then
+          local fallback = utils.keycode(cmd)
           resolved_mappings[cmd].handler = function()
             state.config = config
+            state.fallback = fallback
             return func(state)
           end
           keymap.set(state.bufnr, "n", cmd, resolved_mappings[cmd].handler, map_options)
@@ -877,39 +881,41 @@ local set_buffer_mappings = function(state)
 end
 
 local function create_floating_window(state, win_options, bufname)
-    local win
-    state.force_float = nil
-    -- First get the default options for floating windows.
-    local sourceTitle = state.name:gsub("^%l", string.upper)
-    win_options = popups.popup_options("Neo-tree " .. sourceTitle, 40, win_options)
-    win_options.win_options = nil
-    win_options.zindex = 40
+  state.force_float = nil
+  -- First get the default options for floating windows.
+  local title = utils.resolve_config_option(state, "window.popup.title", function(current_state)
+    return "Neo-tree " .. current_state.name:gsub("^%l", string.upper)
+  end)
+  win_options = popups.popup_options(title, 40, win_options)
+  win_options.win_options = nil
+  win_options.zindex = 40
 
-    -- Then override with source specific options.
-    local b = win_options.border
-    win_options.size = utils.resolve_config_option(state, "window.popup.size", default_popup_size)
-    win_options.position = utils.resolve_config_option(state, "window.popup.position", "50%")
-    win_options.border = utils.resolve_config_option(state, "window.popup.border", b)
+  -- Then override with source specific options.
+  local b = win_options.border
+  win_options.size = utils.resolve_config_option(state, "window.popup.size", default_popup_size)
+  win_options.position = utils.resolve_config_option(state, "window.popup.position", "50%")
+  win_options.border = utils.resolve_config_option(state, "window.popup.border", b)
 
-    win = NuiPopup(win_options)
-    win:mount()
-    win.source_name = state.name
-    win.original_options = state.window
-    table.insert(floating_windows, win)
+  ---@class NuiPopup
+  local win = NuiPopup(win_options)
+  win:mount()
+  win.source_name = state.name
+  win.original_options = state.window
+  table.insert(floating_windows, win)
 
-    win:on({ "BufHidden" }, function()
-      vim.schedule(function()
-        win:unmount()
-      end)
-    end, { once = true })
-    state.winid = win.winid
-    state.bufnr = win.bufnr
-    log.debug("Created floating window with winid: ", win.winid, " and bufnr: ", win.bufnr)
-    vim.api.nvim_buf_set_name(state.bufnr, bufname)
+  win:on({ "BufHidden" }, function()
+    vim.schedule(function()
+      win:unmount()
+    end)
+  end, { once = true })
+  state.winid = win.winid
+  state.bufnr = win.bufnr
+  log.debug("Created floating window with winid: ", win.winid, " and bufnr: ", win.bufnr)
+  vim.api.nvim_buf_set_name(state.bufnr, bufname)
 
-    -- why is this necessary?
-    vim.api.nvim_set_current_win(win.winid)
-    return win
+  -- why is this necessary?
+  vim.api.nvim_set_current_win(win.winid)
+  return win
 end
 
 local get_buffer = function(bufname, state)
@@ -925,11 +931,11 @@ local get_buffer = function(bufname, state)
   if bufnr < 1 then
     bufnr = vim.api.nvim_create_buf(false, false)
     vim.api.nvim_buf_set_name(bufnr, bufname)
-    vim.api.nvim_buf_set_option(bufnr, "buftype", "nofile")
-    vim.api.nvim_buf_set_option(bufnr, "swapfile", false)
-    vim.api.nvim_buf_set_option(bufnr, "filetype", "neo-tree")
-    vim.api.nvim_buf_set_option(bufnr, "modifiable", false)
-    vim.api.nvim_buf_set_option(bufnr, "undolevels", -1)
+    vim.bo[bufnr].buftype = "nofile"
+    vim.bo[bufnr].swapfile = false
+    vim.bo[bufnr].filetype = "neo-tree"
+    vim.bo[bufnr].modifiable = false
+    vim.bo[bufnr].undolevels = -1
     autocmd.buf.define(bufnr, "BufDelete", function()
       M.position.save(state)
     end)
@@ -1041,7 +1047,7 @@ M.acquire_window = function(state)
       M.position.save(state)
     end)
     win:on({ "BufDelete" }, function()
-      vim.schedule(function ()
+      vim.schedule(function()
         win:unmount()
       end)
     end, { once = true })

@@ -1,7 +1,6 @@
 --This file should have all functions that are in the public api and either set
 --or read the state of this source.
 
-local vim = vim
 local utils = require("neo-tree.utils")
 local renderer = require("neo-tree.ui.renderer")
 local items = require("neo-tree.sources.git_status.lib.items")
@@ -10,7 +9,7 @@ local manager = require("neo-tree.sources.manager")
 
 local M = {
   name = "git_status",
-  display_name = " 󰊢 Git "
+  display_name = " 󰊢 Git ",
 }
 
 local wrap = function(func)
@@ -24,6 +23,7 @@ end
 ---Navigate to the given path.
 ---@param path string Path to navigate to. If empty, will navigate to the cwd.
 M.navigate = function(state, path, path_to_reveal, callback, async)
+  state.path = path or state.path
   state.dirty = false
   if path_to_reveal then
     renderer.position.set(state, path_to_reveal)

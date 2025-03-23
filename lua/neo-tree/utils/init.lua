@@ -1,6 +1,6 @@
-local vim = vim
+local uv = vim.uv or vim.loop
 local log = require("neo-tree.log")
-local filesize = require("neo-tree.utils.filesize.filesize")
+local compat = require("neo-tree.utils._compat")
 local bit = require("bit")
 local ffi_available, ffi = pcall(require, "ffi")
 
@@ -125,6 +125,8 @@ M.debounce = function(id, fn, frequency_in_ms, strategy, action)
   if type(fn) == "function" then
     success, result = pcall(fn)
   end
+  ---not sure if this line is needed
+  ---@diagnostic disable-next-line: cast-local-type
   fn = nil
   fn_data.fn = fn
 
@@ -215,9 +217,69 @@ end
 ---@param size any
 ---@return string
 M.human_size = function(size)
-  local human = filesize(size, { output = "string" })
+  local human = require("neo-tree.utils.filesize.filesize")(size, { output = "string" })
   ---@cast human string
   return human
+end
+
+---Converts a Unix timestamp into a human readable relative timestamps
+---@param seconds integer
+---@return string
+M.relative_date = function(seconds)
+  local now = os.time()
+  local diff = now - seconds
+
+  local function format(value, unit)
+    return value .. " " .. unit .. (value == 1 and "" or "s") .. " ago"
+  end
+
+  if diff < 60 then
+    return "Just now"
+  elseif diff < 3600 then
+    local minutes = math.floor(diff / 60)
+    return format(minutes, "minute")
+  elseif diff < 86400 then
+    local hours = math.floor(diff / 3600)
+    return format(hours, "hour")
+  elseif diff < 86400 * 30 then
+    local days = math.floor(diff / 86400)
+    return format(days, "day")
+  elseif diff < 86400 * 365 then
+    local months = math.floor(diff / (86400 * 30))
+    return format(months, "month")
+  end
+  local years = math.floor(diff / (86400 * 365))
+  return format(years, "year")
+end
+
+---@alias neotree.DateFormat string|"relative"|fun(integer):string
+
+---Formats dates. Supports relative dates as a preset, as well as custom formatting using arbitrary functions.
+---Used to let users customize date formatting.
+---
+---If `format` == "relative", it will use utils.relative_date to format.
+---If `format` is a function, it should return a string for neo-tree to display.
+---Else, `format` is presumed to be a format string for os.date().
+---
+---@see os.date()
+---@param format neotree.DateFormat How to format `seconds` into a date string.
+---@param seconds integer? Seconds since the platform epoch (Unix or otherwise). If nil, will be the current time.
+---@return string formatted_date A string that represents the date.
+M.date = function(format, seconds)
+  if not seconds then
+    seconds = os.time()
+  end
+  if format == "relative" then
+    return M.relative_date(seconds)
+  end
+  if type(format) == "function" then
+    return format(seconds)
+  end
+  local formatted_date = os.date(format, seconds)
+  if type(formatted_date) ~= "string" then
+    error('[neo-tree]: the format should not make os.date return a table (e.g. not "*t")')
+  end
+  return formatted_date
 end
 
 ---Gets non-zero diagnostics counts for each open file and each ancestor directory.
@@ -244,7 +306,9 @@ M.get_diagnostic_counts = function()
         local enabled
         if vim.diagnostic.is_enabled then
           enabled = vim.diagnostic.is_enabled({ bufnr = bufnr, ns_id = ns })
+        ---@diagnostic disable-next-line: deprecated
         elseif vim.diagnostic.is_disabled then
+          ---@diagnostic disable-next-line: deprecated
           enabled = not vim.diagnostic.is_disabled(bufnr, ns)
         else
           enabled = true
@@ -309,9 +373,10 @@ M.get_diagnostic_counts = function()
   return lookup
 end
 
---- DEPRECATED: This will be removed in v3. Use `get_opened_buffers` instead.
+---@deprecated
+---This will be removed in v4. Use `get_opened_buffers` instead.
 ---Gets a lookup of all open buffers keyed by path with the modifed flag as the value
----@return table opened_buffers { [buffer_name] = bool }
+---@return table<string, boolean> opened_buffers { [buffer_name] = bool }
 M.get_modified_buffers = function()
   local opened_buffers = M.get_opened_buffers()
   for bufname, bufinfo in pairs(opened_buffers) do
@@ -331,7 +396,7 @@ M.get_opened_buffers = function()
         buffer_name = "[No Name]#" .. buffer
       end
       opened_buffers[buffer_name] = {
-        ["modified"] = vim.api.nvim_buf_get_option(buffer, "modified"),
+        ["modified"] = vim.bo[buffer].modified,
         ["loaded"] = vim.api.nvim_buf_is_loaded(buffer),
       }
     end
@@ -375,14 +440,14 @@ M.get_inner_win_width = function(winid)
   local info = vim.fn.getwininfo(winid)
   if info and info[1] then
     return info[1].width - info[1].textoff
-  else
-    log.error("Could not get window info for window", winid)
   end
+  log.error("Could not get window info for window", winid)
+  return vim.o.columns
 end
 
 local stat_providers = {
   default = function(node)
-    return vim.loop.fs_stat(node.path)
+    return uv.fs_stat(node.path)
   end,
 }
 
@@ -501,7 +566,7 @@ M.is_filtered_by_pattern = function(pattern_list, path, name)
   for _, p in ipairs(pattern_list) do
     local separator_pattern = M.is_windows and "\\" or "/"
     local filename = string.find(p, separator_pattern) and path or name
-    if string.find(filename, p) then
+    if string.find(filename or "", p) then
       return true
     end
   end
@@ -520,7 +585,7 @@ end
 M.is_winfixbuf = function(win_id)
   if vim.fn.exists("&winfixbuf") == 1 then
     win_id = win_id or vim.api.nvim_get_current_win()
-    return vim.api.nvim_get_option_value("winfixbuf", { win = win_id })
+    return vim.wo[win_id].winfixbuf
   end
   return false
 end
@@ -542,7 +607,7 @@ M.is_real_file = function(afile, true_for_terminals)
 
   local success, bufnr = pcall(vim.fn.bufnr, afile)
   if success and bufnr > 0 then
-    local buftype = vim.api.nvim_buf_get_option(bufnr, "buftype")
+    local buftype = vim.bo[bufnr].buftype
 
     if true_for_terminals and buftype == "terminal" then
       return true
@@ -592,8 +657,8 @@ M.get_appropriate_window = function(state, ignore_winfixbuf)
   -- use last window if possible
   local suitable_window_found = false
   local nt = require("neo-tree")
-  local ignore_ft = nt.config.open_files_do_not_replace_types
-  local ignore = M.list_to_dict(ignore_ft)
+  local ignore_list = nt.config.open_files_do_not_replace_types or {}
+  local ignore = M.list_to_dict(ignore_list)
   ignore["neo-tree"] = true
   if nt.config.open_files_in_last_window then
     local prior_window = nt.get_prior_window(ignore, ignore_winfixbuf)
@@ -649,7 +714,7 @@ M.resolve_width = function(width)
       width = tonumber(string.sub(width, 1, #width - 1)) / 100
       width = width * available_width
     else
-      width = tonumber(width)
+      width = tonumber(width) or default_width
     end
   elseif type(width) == "function" then
     width = width()
@@ -674,11 +739,13 @@ M.force_new_split = function(current_position, escaped_path)
   if escaped_path == M.escape_path_for_cmd("[No Name]") then
     -- vim's default behavior is to overwrite [No Name] buffers.
     -- We need to split first and then open the path to workaround this behavior.
+    ---@diagnostic disable-next-line: param-type-mismatch
     result, err = pcall(vim.cmd, split_command)
     if result then
       vim.cmd.edit(escaped_path)
     end
   else
+    ---@diagnostic disable-next-line: param-type-mismatch
     result, err = pcall(vim.cmd, split_command .. " " .. escaped_path)
   end
   return result, err
@@ -707,7 +774,8 @@ M.open_file = function(state, path, open_cmd, bufnr)
   end
 
   if M.truthy(path) then
-    local escaped_path = M.escape_path_for_cmd(path)
+    local relative = require("neo-tree").config.open_files_using_relative_paths
+    local escaped_path = M.escape_path_for_cmd(relative and vim.fn.fnamemodify(path, ":.") or path)
     local bufnr_or_path = bufnr or escaped_path
     local events = require("neo-tree.events")
     local result = true
@@ -723,6 +791,7 @@ M.open_file = function(state, path, open_cmd, bufnr)
       return
     end
     if state.current_position == "current" then
+      ---@diagnostic disable-next-line: param-type-mismatch
       result, err = pcall(vim.cmd, open_cmd .. " " .. bufnr_or_path)
     else
       local winid, is_neo_tree_window = M.get_appropriate_window(state)
@@ -738,6 +807,7 @@ M.open_file = function(state, path, open_cmd, bufnr)
         result, err = M.force_new_split(state.current_position, escaped_path)
         vim.api.nvim_win_set_width(winid, width)
       else
+        ---@diagnostic disable-next-line: param-type-mismatch
         result, err = pcall(vim.cmd, open_cmd .. " " .. bufnr_or_path)
       end
     end
@@ -748,6 +818,7 @@ M.open_file = function(state, path, open_cmd, bufnr)
       -- otherwise, all windows are either neo-tree or winfixbuf so we make a new split.
       if not is_neo_tree_window and not M.is_winfixbuf(winid) then
         vim.api.nvim_set_current_win(winid)
+        ---@diagnostic disable-next-line: param-type-mismatch
         result, err = pcall(vim.cmd, open_cmd .. " " .. bufnr_or_path)
       else
         result, err = M.force_new_split(state.current_position, escaped_path)
@@ -755,7 +826,7 @@ M.open_file = function(state, path, open_cmd, bufnr)
     end
     if result or err == "Vim(edit):E325: ATTENTION" then
       -- fixes #321
-      vim.api.nvim_buf_set_option(0, "buflisted", true)
+      vim.bo[0].buflisted = true
       events.fire_event(events.FILE_OPENED, path)
     else
       log.error("Error opening file:", err)
@@ -802,7 +873,7 @@ M.normalize_path = function(path)
     path = path:sub(1, 1):upper() .. path:sub(2)
     -- Turn mixed forward and back slashes into all forward slashes
     -- using NeoVim's logic
-    path = vim.fs.normalize(path)
+    path = vim.fs.normalize(path, { win = true })
     -- Now use backslashes, as expected by the rest of Neo-Tree's code
     path = path:gsub("/", M.path_separator)
   end
@@ -810,18 +881,29 @@ M.normalize_path = function(path)
 end
 
 ---Check if a path is a subpath of another.
---@param base string The base path.
---@param path string The path to check is a subpath.
---@return boolean boolean True if it is a subpath, false otherwise.
+---@param base string The base path.
+---@param path string The path to check is a subpath.
+---@return boolean boolean True if it is a subpath, false otherwise.
 M.is_subpath = function(base, path)
   if not M.truthy(base) or not M.truthy(path) then
     return false
   elseif base == path then
     return true
   end
+
   base = M.normalize_path(base)
   path = M.normalize_path(path)
-  return string.sub(path, 1, string.len(base)) == base
+  if path:sub(1, #base) == base then
+    local base_parts = M.split(base, M.path_separator)
+    local path_parts = M.split(path, M.path_separator)
+    for i, part in ipairs(base_parts) do
+      if path_parts[i] ~= part then
+        return false
+      end
+    end
+    return true
+  end
+  return false
 end
 
 ---The file system path separator for the current platform.
@@ -928,9 +1010,9 @@ M.split = function(inputString, sep)
 end
 
 ---Split a path into a parentPath and a name.
----@param path string The path to split.
----@return string|nil parentPath
----@return string|nil name
+---@param path string? The path to split.
+---@return string? parentPath
+---@return string? name
 M.split_path = function(path)
   if not path then
     return nil, nil
@@ -998,12 +1080,22 @@ table_merge_internal = function(base_table, override_table)
   return base_table
 end
 
----DEPRECATED: Use vim.deepcopy(source_table, { noref = 1 }) instead.
+---@deprecated
+---Use
+---```lua
+---vim.deepcopy(source_table, true)
+---```
+---instead.
 M.table_copy = function(source_table)
-  return vim.deepcopy(source_table, { noref = 1 })
+  return vim.deepcopy(source_table, compat.noref())
 end
 
----DEPRECATED: Use vim.tbl_deep_extend("force", base_table, source_table) instead.
+---@deprecated
+---Use:
+---```lua
+---vim.tbl_deep_extend("force", base_table, source_table) instead.
+---```
+---instead.
 M.table_merge = function(base_table, override_table)
   local merged_table = table_merge_internal({}, base_table)
   return table_merge_internal(merged_table, override_table)
@@ -1132,6 +1224,15 @@ local brace_expand_split = function(s, separator)
   return s, nil
 end
 
+---@param tbl table
+local function flatten(tbl)
+  if vim.iter then
+    return vim.iter(tbl):flatten():totable()
+  end
+
+  ---@diagnostic disable-next-line: deprecated
+  return vim.tbl_flatten(tbl)
+end
 ---Perform brace expansion on a string and return the sequence of the results
 ---@param s string?: input string which is inside braces, if nil return { "" }
 ---@return string[] | nil: list of strings each representing the individual expanded strings
@@ -1163,10 +1264,12 @@ local brace_expand_contents = function(s)
     return items
   end
 
+  ---@alias neotree.Utils.Resolver fun(from: string, to: string, step: string): string[]
+
   ---If pattern matches the input string `s`, apply an expansion by `resolve_func`
   ---@param pattern string: regex to match on `s`
-  ---@param resolve_func fun(from: string, to: string, step: string): string[]
-  ---@return string[] | nil: expanded sequence or nil if failed
+  ---@param resolve_func neotree.Utils.Resolver
+  ---@return string[]|nil sequence Expanded sequence or nil if failed
   local function try_sequence_on_pattern(pattern, resolve_func)
     local from, to, step = string.match(s, pattern)
     if from then
@@ -1195,6 +1298,7 @@ local brace_expand_contents = function(s)
     end)
   end
 
+  ---@type table<string, neotree.Utils.Resolver>
   local check_list = {
     { [=[^(-?%d+)%.%.(-?%d+)%.%.(-?%d+)$]=], resolve_sequence_num },
     { [=[^(-?%d+)%.%.(-?%d+)$]=], resolve_sequence_num },
@@ -1202,7 +1306,7 @@ local brace_expand_contents = function(s)
     { [=[^(%a)%.%.(%a)$]=], resolve_sequence_char },
   }
   for _, list in ipairs(check_list) do
-    local regex, func = table.unpack(list)
+    local regex, func = list[1], list[2]
     local sequence = try_sequence_on_pattern(regex, func)
     if sequence then
       return sequence
@@ -1218,7 +1322,7 @@ local brace_expand_contents = function(s)
   if #items == 1 then -- Only one expansion found. Abort.
     return nil
   end
-  return vim.tbl_flatten(items)
+  return flatten(items)
 end
 
 ---brace_expand:
@@ -1291,6 +1395,85 @@ M.index_by_path = function(tbl, key)
   end
 
   return value
+end
+
+---Backport of vim.keycode
+---@see vim.keycode
+---@param str string
+---@return string representation Internal representation of the keycodes
+function M.keycode(str)
+  return vim.api.nvim_replace_termcodes(str, true, true, true)
+end
+
+---Iterate through a table, sorted by its keys.
+---Compared to vim.spairs, it also accepts a method that specifies how to sort the table by key.
+---
+---@see vim.spairs
+---@see table.sort
+---
+---@generic T: table, K, V
+---@param t T Dict-like table
+---@param sorter? fun(a: K, b: K):boolean A function that returns true if a is less than b.
+---@return fun(table: table<K, V>, index?: K):K, V # |for-in| iterator over sorted keys and their values
+---@return T
+function M.spairs(t, sorter)
+  -- collect the keys
+  local keys = {}
+  for k in pairs(t) do
+    table.insert(keys, k)
+  end
+  table.sort(keys, sorter)
+
+  -- Return the iterator function.
+  local i = 0
+  return function()
+    i = i + 1
+    if keys[i] then
+      return keys[i], t[keys[i]]
+    end
+  end,
+    t
+end
+
+local strwidth = vim.api.nvim_strwidth
+local strcharpart, strchars = vim.fn.strcharpart, vim.fn.strchars
+local slice = vim.fn.exists("*slice") == 1 and vim.fn.slice
+  or function(str, start, _end)
+    local char_amount = strchars(str)
+    _end = _end or char_amount
+    _end = _end < 0 and (char_amount + _end) or _end
+    return strcharpart(str, start, _end)
+  end
+
+-- Function below provided by @akinsho, modified by @pynappo
+-- https://github.com/nvim-neo-tree/neo-tree.nvim/pull/427#discussion_r924947766
+-- TODO: maybe use vim.stf_utf* functions instead of strchars, once neovim updates enough
+
+-- Truncate a string based on number of display columns/cells it occupies
+-- so that multibyte characters are not broken up mid-character
+---@param str string
+---@param col_limit number
+---@param align 'left'|'right'|nil
+---@return string shortened
+---@return number width
+M.truncate_by_cell = function(str, col_limit, align)
+  local width = strwidth(str)
+  if width <= col_limit then
+    return str, width
+  end
+  local short = str
+  if align == "right" then
+    short = slice(short, 1)
+    while strwidth(short) > col_limit do
+      short = slice(short, 1)
+    end
+  else
+    short = slice(short, 0, -1)
+    while strwidth(short) > col_limit do
+      short = slice(short, 0, -1)
+    end
+  end
+  return short, strwidth(short)
 end
 
 return M

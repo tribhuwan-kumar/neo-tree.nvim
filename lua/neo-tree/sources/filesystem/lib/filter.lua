@@ -1,6 +1,5 @@
 -- This file holds all code for the search function.
 
-local vim = vim
 local Input = require("nui.input")
 local event = require("nui.utils.autocmd").event
 local fs = require("neo-tree.sources.filesystem")
@@ -9,19 +8,9 @@ local renderer = require("neo-tree.ui.renderer")
 local utils = require("neo-tree.utils")
 local log = require("neo-tree.log")
 local manager = require("neo-tree.sources.manager")
+local compat = require("neo-tree.utils._compat")
 
 local M = {}
-
-local cmds = {
-  move_cursor_down = function(state, scroll_padding)
-    renderer.focus_node(state, nil, true, 1, scroll_padding)
-  end,
-
-  move_cursor_up = function(state, scroll_padding)
-    renderer.focus_node(state, nil, true, -1, scroll_padding)
-    vim.cmd("redraw!")
-  end,
-}
 
 local function create_input_mapping_handle(cmd, state, scroll_padding)
   return function()
@@ -42,6 +31,9 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
     else
       popup_msg = "Filter:"
     end
+  end
+  if state.config.title then
+    popup_msg = state.config.title
   end
   if state.current_position == "float" then
     scroll_padding = 0
@@ -78,7 +70,9 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
     local a_score = result_scores[a.path]
     local b_score = result_scores[b.path]
     if a_score == nil or b_score == nil then
-      log.debug(string.format([[Fzy: failed to compare %s: %s, %s: %s]], a.path, a_score, b.path, b_score))
+      log.debug(
+        string.format([[Fzy: failed to compare %s: %s, %s: %s]], a.path, a_score, b.path, b_score)
+      )
       local config = require("neo-tree").config
       if config.sort_function ~= nil then
         return config.sort_function(a, b)
@@ -101,6 +95,7 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
   local has_pre_search_folders = utils.truthy(state.open_folders_before_search)
   if not has_pre_search_folders then
     log.trace("No search or pre-search folders, recording pre-search folders now")
+    ---@type table|nil
     state.open_folders_before_search = renderer.get_expanded_nodes(state.tree)
   end
 
@@ -153,7 +148,7 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
         log.trace("Resetting search in on_change")
         local original_open_folders = nil
         if type(state.open_folders_before_search) == "table" then
-          original_open_folders = vim.deepcopy(state.open_folders_before_search, { noref = 1 })
+          original_open_folders = vim.deepcopy(state.open_folders_before_search, compat.noref())
         end
         fs.reset_search(state)
         state.open_folders_before_search = original_open_folders
@@ -165,6 +160,7 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
           state.sort_function_override = sort_by_score
           state.use_fzy = true
         end
+        ---@type function|nil
         local callback = select_first_file
         if fuzzy_finder_mode == "directory" then
           callback = nil
@@ -194,18 +190,7 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
       vim.api.nvim_win_set_height(winid, height)
     end
   end)
-  input:map("i", "<esc>", function(bufnr)
-    vim.cmd("stopinsert")
-    input:unmount()
-    if fuzzy_finder_mode and utils.truthy(state.search_pattern) then
-      fs.reset_search(state, true)
-    end
-    restore_height()
-  end, { noremap = true })
-
-  input:map("i", "<C-w>", "<C-S-w>", { noremap = true })
-
-  input:on({ event.BufLeave, event.BufDelete }, function()
+  local close_input = function()
     vim.cmd("stopinsert")
     input:unmount()
     -- If this was closed due to submit, that function will handle the reset_search
@@ -215,22 +200,50 @@ M.show_filter = function(state, search_as_you_type, fuzzy_finder_mode, use_fzy)
       end
     end, 100)
     restore_height()
-  end, { once = true })
+  end
+
+  input:on({ event.BufLeave, event.BufDelete }, close_input, { once = true })
+
+  input:map("i", "<C-w>", "<C-S-w>", { noremap = true })
 
   if fuzzy_finder_mode then
-    local config = require("neo-tree").config
-    for lhs, cmd_name in pairs(config.filesystem.window.fuzzy_finder_mappings) do
+    local cmds = {
+      move_cursor_down = function(_state, _scroll_padding)
+        renderer.focus_node(_state, nil, true, 1, _scroll_padding)
+      end,
+
+      move_cursor_up = function(_state, _scroll_padding)
+        renderer.focus_node(_state, nil, true, -1, _scroll_padding)
+        vim.cmd("redraw!")
+      end,
+
+      close = function()
+        close_input()
+      end,
+    }
+    for lhs, cmd_name in pairs(require("neo-tree").config.filesystem.window.fuzzy_finder_mappings) do
       local t = type(cmd_name)
       if t == "string" then
         local cmd = cmds[cmd_name]
         if cmd then
-          input:map("i", lhs, create_input_mapping_handle(cmd, state, scroll_padding), { noremap = true })
+          input:map(
+            "i",
+            lhs,
+            create_input_mapping_handle(cmd, state, scroll_padding),
+            { noremap = true }
+          )
         else
-          log.warn(string.format("Invalid command in fuzzy_finder_mappings: %s = %s", lhs, cmd_name))
+          log.warn(
+            string.format("Invalid command in fuzzy_finder_mappings: %s = %s", lhs, cmd_name)
+          )
         end
       elseif t == "function" then
-        input:map("i", lhs, create_input_mapping_handle(cmd_name, state, scroll_padding),
-          { noremap = true })
+        input:map(
+          "i",
+          lhs,
+          create_input_mapping_handle(cmd_name, state, scroll_padding),
+          { noremap = true }
+        )
       else
         log.warn(string.format("Invalid command in fuzzy_finder_mappings: %s = %s", lhs, cmd_name))
       end
