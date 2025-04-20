@@ -116,7 +116,7 @@ end
 
 ---Expand all nodes
 ---@param state table The state of the source
----@param node table A node to expand
+---@param node table? A single node to expand (defaults to all root nodes)
 ---@param prefetcher table? an object with two methods `prefetch(state, node)` and `should_prefetch(node) => boolean`
 M.expand_all_nodes = function(state, node, prefetcher)
   local root_nodes = node and { node } or state.tree:get_nodes()
@@ -133,6 +133,14 @@ M.expand_all_nodes = function(state, node, prefetcher)
     log.debug("All nodes expanded - redrawing")
     renderer.redraw(state)
   end)
+end
+
+---Expand all subnodes
+---@param state table The state of the source
+---@param node table? A single node to expand (defaults to node under the cursor)
+---@param prefetcher table? an object with two methods `prefetch(state, node)` and `should_prefetch(node) => boolean`
+M.expand_all_subnodes = function(state, node, prefetcher)
+  M.expand_all_nodes(state, node or state.tree:get_node(), prefetcher)
 end
 
 M.close_node = function(state, callback)
@@ -723,7 +731,7 @@ M.toggle_directory = function(state, toggle_directory)
   M.toggle_node(state, toggle_directory)
 end
 
----Open file or directory
+---Open file or expandable node
 ---@param state table The state of the source
 ---@param open_cmd string The vim command to use to open the file
 ---@param toggle_directory function The function to call to toggle a directory
@@ -731,9 +739,6 @@ end
 local open_with_cmd = function(state, open_cmd, toggle_directory, open_file)
   local tree = state.tree
   local success, node = pcall(tree.get_node, tree)
-  if node.type == "message" then
-    return
-  end
   if not (success and node) then
     log.debug("Could not get node.")
     return
@@ -762,13 +767,13 @@ local open_with_cmd = function(state, open_cmd, toggle_directory, open_file)
   end
 
   local config = state.config or {}
-  if node.type ~= "directory" and config.no_expand_file ~= nil then
+  if node.type == "file" and config.no_expand_file ~= nil then
     log.warn("`no_expand_file` options is deprecated, move to `expand_nested_files` (OPPOSITE)")
     config.expand_nested_files = not config.no_expand_file
   end
-  if node.type == "directory" then
-    M.toggle_node(state, toggle_directory)
-  elseif node:has_children() and config.expand_nested_files and not node:is_expanded() then
+
+  local should_expand_file = config.expand_nested_files and not node:is_expanded()
+  if utils.is_expandable(node) and (node.type ~= "file" or should_expand_file) then
     M.toggle_node(state, toggle_directory)
   else
     open()
