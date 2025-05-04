@@ -4,6 +4,7 @@ local events = require("neo-tree.events")
 local manager = require("neo-tree.sources.manager")
 local log = require("neo-tree.log")
 local renderer = require("neo-tree.ui.renderer")
+local NuiPopup = require("nui.popup")
 
 local neo_tree_preview_namespace = vim.api.nvim_create_namespace("neo_tree_preview")
 
@@ -57,6 +58,12 @@ local function create_floating_preview_window(state)
     return
   end
 
+  if height < 5 or width < 5 then
+    log.error(
+      "Preview cannot be used without any space, please resize the neo-tree split to allow for at least 5 cells of free space."
+    )
+    return
+  end
   local popups = require("neo-tree.ui.popups")
   local options = popups.popup_options(title, width, {
     ns_id = highlights.ns_id,
@@ -77,7 +84,6 @@ local function create_floating_preview_window(state)
   options.zindex = 40
   options.buf_options.filetype = "neo-tree-preview"
 
-  local NuiPopup = require("nui.popup")
   local win = NuiPopup(options)
   win:mount()
   return win
