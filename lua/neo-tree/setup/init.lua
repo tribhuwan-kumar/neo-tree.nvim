@@ -11,17 +11,27 @@ local hijack_cursor = require("neo-tree.sources.common.hijack_cursor")
 
 local M = {}
 
-local normalize_mappings = function(config)
-  if config == nil then
-    return false
+---@param source_config { window: {mappings: neotree.Config.Window.Mappings} }
+local normalize_mappings = function(source_config)
+  if source_config == nil then
+    return
   end
-  local mappings = utils.get_value(config, "window.mappings", nil)
+  local mappings = vim.tbl_get(source_config, { "window", "mappings" })
   if mappings then
-    local fixed = mapping_helper.normalize_map(mappings)
-    config.window.mappings = fixed
-    return true
-  else
-    return false
+    local fixed = mapping_helper.normalize_mappings(mappings)
+    source_config.window.mappings = fixed --[[@as neotree.Config.Window.Mappings]]
+  end
+end
+
+---@param source_config neotree.Config.Filesystem
+local normalize_fuzzy_mappings = function(source_config)
+  if source_config == nil then
+    return
+  end
+  local mappings = source_config.window and source_config.window.fuzzy_finder_mappings
+  if mappings then
+    local fixed = mapping_helper.normalize_mappings(mappings)
+    source_config.window.fuzzy_finder_mappings = fixed --[[@as neotree.Config.FuzzyFinder.Mappings]]
   end
 end
 
@@ -262,9 +272,13 @@ M.buffer_enter_event = function()
   end
 end
 
+---@type boolean?
+local curwin_floating = nil
 M.win_enter_event = function()
   local win_id = vim.api.nvim_get_current_win()
-  if utils.is_floating(win_id) then
+  local previous_window_floating = curwin_floating
+  curwin_floating = utils.is_floating(win_id)
+  if curwin_floating then
     return
   end
 
@@ -282,11 +296,18 @@ M.win_enter_event = function()
     log.trace("checking if last window")
     log.trace("prior window exists = ", prior_exists)
     log.trace("win_count: ", win_count)
-    if prior_exists and win_count == 1 and vim.o.filetype == "neo-tree" then
-      local position = vim.api.nvim_buf_get_var(0, "neo_tree_position")
-      local source = vim.api.nvim_buf_get_var(0, "neo_tree_source")
+    if
+      prior_exists
+      and win_count == 1
+      and vim.o.filetype == "neo-tree"
+      -- if neo-tree managed to stay open long enough for users to open popups, (e.g. other windows automatically closed
+      -- w/o triggering new WinEnter events), we shouldn't close even if it is technically the last window
+      and not previous_window_floating
+    then
+      local position = vim.b[0].neo_tree_position
+      local source = vim.b[0].neo_tree_source
+      -- close_if_last_window just doesn't make sense for a split style
       if position ~= "current" then
-        -- close_if_last_window just doesn't make sense for a split style
         log.trace("last window, closing")
         local state = require("neo-tree.sources.manager").get_state(source)
         if state == nil then
@@ -344,7 +365,7 @@ M.win_enter_event = function()
             return
           end
           -- create a new tree for this window
-          local state = manager.get_state("filesystem", nil, current_winid)
+          local state = manager.get_state("filesystem", nil, current_winid) --[[@as neotree.sources.filesystem.State]]
           state.path = old_state.path
           state.current_position = "current"
           local renderer = require("neo-tree.ui.renderer")
@@ -475,7 +496,9 @@ M.merge_config = function(user_config)
   log.use_file(user_config.log_to_file, true)
   log.debug("setup")
 
-  events.clear_all_events()
+  if events_setup then
+    events.clear_all_events()
+  end
   define_events()
 
   -- Prevent netrw hijacking lazy-loading from conflicting with normal hijacking.
@@ -559,6 +582,11 @@ M.merge_config = function(user_config)
   log.debug("Sources to load: ", vim.inspect(all_sources))
   require("neo-tree.command.parser").setup(all_source_names)
 
+  normalize_fuzzy_mappings(default_config.filesystem)
+  normalize_fuzzy_mappings(user_config.filesystem)
+  if user_config.use_default_mappings == false then
+    default_config.filesystem.window.fuzzy_finder_mappings = {}
+  end
   -- setup the default values for all sources
   normalize_mappings(default_config)
   normalize_mappings(user_config)
@@ -610,7 +638,6 @@ M.merge_config = function(user_config)
       user_config[source_name].window.position = "left"
     end
   end
-  --print(vim.inspect(default_config.filesystem))
 
   -- local orig_sources = user_config.sources and user_config.sources or {}
 
@@ -700,16 +727,6 @@ M.merge_config = function(user_config)
     manager.redraw(source_name)
   end
 
-  if M.config.auto_clean_after_session_restore then
-    require("neo-tree.ui.renderer").clean_invalid_neotree_buffers(false)
-    events.subscribe({
-      event = events.VIM_AFTER_SESSION_LOAD,
-      handler = function()
-        require("neo-tree.ui.renderer").clean_invalid_neotree_buffers(true)
-      end,
-    })
-  end
-
   events.subscribe({
     event = events.VIM_COLORSCHEME,
     handler = highlights.setup,
@@ -740,6 +757,9 @@ M.merge_config = function(user_config)
     event = events.VIM_WIN_CLOSED,
     handler = function(args)
       local winid = tonumber(args.afile)
+      if not winid then
+        return
+      end
       log.debug("VIM_WIN_CLOSED: disposing state for window", winid)
       manager.dispose_window(winid)
     end,
